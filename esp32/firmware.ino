@@ -193,14 +193,37 @@ void signNonce(uint8_t *nonce)
   uint8_t buffer[64];
   uint8_t signature[32];
 
+  // Initialize signature to zeros
+  memset(signature, 0, 32);
+
   memcpy(buffer, daily_key, 32);
   memcpy(buffer + 32, nonce, 32);
 
+  // Compute SHA-256
   sha256(buffer, 64, signature);
+
+  // Verify signature is not corrupted (all zeros or all ones)
+  uint8_t allZeros = 1;
+  uint8_t allOnes = 1;
+  for (int i = 0; i < 32; i++)
+  {
+    if (signature[i] != 0) allZeros = 0;
+    if (signature[i] != 0xFF) allOnes = 0;
+  }
+
+  if (allZeros || allOnes)
+  {
+    Serial.print("ERROR:SHA256 failed (signature invalid: ");
+    if (allZeros) Serial.print("all zeros");
+    else Serial.print("all ones");
+    Serial.println(")");
+    return;
+  }
 
   Serial.print("SIGNATURE:");
   printHex(signature, 32);
   Serial.println();
+  Serial.flush();  // Ensure data is sent before returning
 }
 
 void signData(uint8_t *data, int dataLen)
@@ -211,20 +234,41 @@ void signData(uint8_t *data, int dataLen)
   
   if (!buffer)
   {
-    Serial.println("ERROR:Out of memory");
+    Serial.println("ERROR:Out of memory for SIGN");
     return;
   }
 
   uint8_t signature[32];
+  memset(signature, 0, 32);  // Initialize to zeros
+  
   memcpy(buffer, daily_key, 32);
   memcpy(buffer + 32, data, dataLen);
 
   sha256(buffer, bufLen, signature);
   free(buffer);
 
+  // Verify signature is not corrupted
+  uint8_t allZeros = 1;
+  uint8_t allOnes = 1;
+  for (int i = 0; i < 32; i++)
+  {
+    if (signature[i] != 0) allZeros = 0;
+    if (signature[i] != 0xFF) allOnes = 0;
+  }
+
+  if (allZeros || allOnes)
+  {
+    Serial.print("ERROR:SHA256 failed (signature invalid: ");
+    if (allZeros) Serial.print("all zeros");
+    else Serial.print("all ones");
+    Serial.println(")");
+    return;
+  }
+
   Serial.print("SIGNED:");
   printHex(signature, 32);
   Serial.println();
+  Serial.flush();  // Ensure data is sent before returning
 }
 
 // ── Setup ──────────────────────────────────────────────────────────────
@@ -313,6 +357,33 @@ void loop()
     else if (input == "PING")
     {
       Serial.println("PONG");
+    }
+    // ── TEST SHA256 (diagnostic) ──
+    else if (input == "TEST")
+    {
+      // Test SHA-256 with known input
+      // SHA-256("test") should be: 9f86d081884c7d6d9ffd60014fc7ee77e0c4e8cc5ffe3a5fe6b827e4c91f7d5e
+      uint8_t testInput[] = { 't', 'e', 's', 't' };
+      uint8_t testOutput[32];
+      memset(testOutput, 0, 32);
+      
+      sha256(testInput, 4, testOutput);
+      
+      Serial.print("TEST:SHA256(test)=");
+      printHex(testOutput, 32);
+      Serial.println();
+      Serial.flush();
+    }
+    // ── DUMP key (diagnostic) ──
+    else if (input == "DUMP")
+    {
+      Serial.print("DUMP:daily_key=");
+      printHex(daily_key, 32);
+      Serial.println();
+      Serial.print("DUMP:public_key=");
+      printHex(public_key, 32);
+      Serial.println();
+      Serial.flush();
     }
     // ── Unknown command ──
     else

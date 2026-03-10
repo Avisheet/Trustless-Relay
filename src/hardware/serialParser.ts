@@ -88,15 +88,23 @@ export function parseSerialLine(line: string): ParsedSerialMessage {
       cmd.includes("SEED") ||
       cmd.includes("GENERATING") ||
       cmd.includes("LOADED") ||
-      cmd.includes("ENTER USERNAME")
+      cmd.includes("ENTER USERNAME") ||
+      cmd.includes("BOOTING") ||
+      cmd.includes("STARTING")
     ) {
       return { type: "INFO", value: trimmed, raw: line };
     }
     return { type: "UNKNOWN", value: trimmed, raw: line };
   }
 
-  const prefix = trimmed.substring(0, colonIndex).toUpperCase();
-  const value = trimmed.substring(colonIndex + 1);
+  const prefix = trimmed.substring(0, colonIndex).toUpperCase().trim();
+  let value = trimmed.substring(colonIndex + 1).trim();
+  
+  // For hex-containing messages (SIGNATURE, SIGNED, PUBLIC_KEY, etc.),
+  // clean up any remaining whitespace or control characters
+  if (["SIGNATURE", "SIGNED", "PUBLIC_KEY", "NONCE", "SIGN"].includes(prefix)) {
+    value = value.replace(/\s+/g, "").toLowerCase();
+  }
 
   const knownTypes: SerialMessageType[] = [
     "USERNAME", "PUBLIC_KEY", "FIRMWARE", "NONCE",
@@ -141,16 +149,24 @@ export function parseHandshake(
   for (const msg of lines) {
     switch (msg.type) {
       case "USERNAME":
-        username = msg.value.trim();
-        break;
-      case "PUBLIC_KEY":
-        if (isValidHex(msg.value.trim())) {
-          publicKey = msg.value.trim();
+        const rawUsername = msg.value.trim();
+        if (rawUsername.length > 0 && rawUsername.length <= 50) {
+          username = rawUsername;
         }
         break;
+
+      case "PUBLIC_KEY":
+        const rawKey = msg.value.trim();
+        // Validate it's valid hex and reasonable length (32-128 bytes = 64-256 hex chars)
+        if (isValidHex(rawKey) && rawKey.length >= 64 && rawKey.length <= 256) {
+          publicKey = rawKey;
+        }
+        break;
+
       case "FIRMWARE":
         firmwareVersion = msg.value.trim();
         break;
+
       case "READY":
         ready = true;
         break;

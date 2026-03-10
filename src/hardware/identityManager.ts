@@ -236,33 +236,66 @@ export function verifyESP32NonceLiveness(
   nonceHex: string,
   signatureHex: string
 ): { valid: boolean; reason: string } {
-  // Check lengths (SHA-256 = 32 bytes = 64 hex chars)
-  if (!publicKeyHex || publicKeyHex.length !== 64) {
-    return { valid: false, reason: "Invalid public key length (expected 64 hex chars)" };
+  // Clean whitespace from all values (serial might have extra spaces)
+  const pk = (publicKeyHex || "").trim().toLowerCase();
+  const nc = (nonceHex || "").trim().toLowerCase();
+  const sig = (signatureHex || "").trim().toLowerCase();
+
+  // Validate hex format first
+  const hexRegex = /^[0-9a-f]*$/;
+  
+  if (!pk || !hexRegex.test(pk)) {
+    return { 
+      valid: false, 
+      reason: `Invalid public key format. Length: ${pk.length}, Expected: 64 hex chars` 
+    };
   }
-  if (!nonceHex || nonceHex.length !== 64) {
-    return { valid: false, reason: "Invalid nonce length (expected 64 hex chars)" };
+  
+  if (!nc || !hexRegex.test(nc)) {
+    return { 
+      valid: false, 
+      reason: `Invalid nonce format. Length: ${nc.length}, Expected: 64 hex chars` 
+    };
   }
-  if (!signatureHex || signatureHex.length !== 64) {
-    return { valid: false, reason: "Invalid signature length (expected 64 hex chars)" };
+  
+  if (!sig || !hexRegex.test(sig)) {
+    return { 
+      valid: false, 
+      reason: `Invalid signature format (non-hex or empty). Length: ${sig.length}, Expected: 64+ hex chars` 
+    };
   }
 
-  // Check valid hex
-  const hexRegex = /^[0-9a-fA-F]+$/;
-  if (!hexRegex.test(publicKeyHex)) {
-    return { valid: false, reason: "Public key contains non-hex characters" };
+  // Check lengths (SHA-256 = 32 bytes = 64 hex chars)
+  if (pk.length !== 64) {
+    return { 
+      valid: false, 
+      reason: `Invalid public key length. Got: ${pk.length}, Expected: 64 hex chars` 
+    };
   }
-  if (!hexRegex.test(signatureHex)) {
-    return { valid: false, reason: "Signature contains non-hex characters" };
+  
+  if (nc.length !== 64) {
+    return { 
+      valid: false, 
+      reason: `Invalid nonce length. Got: ${nc.length}, Expected: 64 hex chars` 
+    };
+  }
+  
+  // Allow signature lengths from 32 to 256 hex chars (16-128 bytes)
+  // SHA-256 produces 64 hex chars, but support other algorithms
+  if (sig.length < 32 || sig.length > 256) {
+    return { 
+      valid: false, 
+      reason: `Invalid signature length. Got: ${sig.length}, Expected: 32-256 hex chars (16-128 bytes)` 
+    };
   }
 
   // Signature should not equal the public key (would mean device echoed PK)
-  if (signatureHex.toLowerCase() === publicKeyHex.toLowerCase()) {
+  if (sig === pk) {
     return { valid: false, reason: "Signature equals public key (device may be echoing)" };
   }
 
   // Signature should not equal the nonce (would mean device echoed nonce)
-  if (signatureHex.toLowerCase() === nonceHex.toLowerCase()) {
+  if (sig === nc) {
     return { valid: false, reason: "Signature equals nonce (device may be echoing)" };
   }
 

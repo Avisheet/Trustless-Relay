@@ -103,7 +103,14 @@ export function useHardwareIdentity(): [HardwareIdentityState, HardwareIdentityA
 
       if (!liveness.valid) {
         await device.disconnect();
-        throw new Error(`ESP nonce challenge failed: ${liveness.reason}`);
+        const serialLog = device.getSerialLog();
+        const lastSigLog = serialLog
+          .reverse()
+          .find((log) => log.data.includes("SIGNATURE") || log.data.includes("Response"));
+        const diagnostic = lastSigLog 
+          ? ` Last response: ${lastSigLog.data.slice(0, 50)}...`
+          : " Check Hardware Debug Panel for serial log.";
+        throw new Error(`ESP nonce challenge failed: ${liveness.reason}.${diagnostic}`);
       }
 
       console.log(`[Hardware] ${liveness.reason}`);
