@@ -325,6 +325,15 @@ export class RealESP32Device implements IHardwareDevice {
 
   /**
    * Wait for the device handshake sequence.
+   * Works with both the original ESP firmware (no READY) and the
+   * enhanced version (with READY). Tolerates boot messages like
+   * "ESP8266 AUTH MODULE", "Loaded existing device seed", etc.
+   * 
+   * Strategy:
+   * 1. First wait up to `timeoutMs` collecting lines
+   * 2. Try to parse USERNAME + PUBLIC_KEY (+ optional READY/FIRMWARE)
+   * 3. If we get USERNAME + PUBLIC_KEY but no READY, wait 2 more seconds
+   *    in case READY arrives late, then accept without READY
    */
   private async waitForHandshake(timeoutMs: number): Promise<{
     username: string;
@@ -337,7 +346,8 @@ export class RealESP32Device implements IHardwareDevice {
     // First drain anything already in the queue
     while (this.lineQueue.length > 0) {
       handshakeLines.push(this.lineQueue.shift()!);
-      const result = parseHandshake(handshakeLines);
+      // Try with READY first (enhanced firmware)
+      const result = parseHandshake(handshakeLines, true);
       if (result) return result;
     }
 
@@ -346,16 +356,52 @@ export class RealESP32Device implements IHardwareDevice {
       const remaining = deadline - Date.now();
       if (remaining <= 0) break;
 
+      // Wait for any line type
       try {
-        const msg = await this.waitForResponse("USERNAME", remaining)
-          .catch(() => this.waitForResponse("PUBLIC_KEY", Math.max(remaining - 100, 100)))
-          .catch(() => this.waitForResponse("READY", Math.max(remaining - 200, 100)))
-          .catch(() => null);
+        const msg = await new Promise<ParsedSerialMessage | null>((resolve) => {
+          // Check queue first
+          if (this.lineQueue.length > 0) {
+            resolve(this.lineQueue.shift()!);
+            return;
+          }
+          // Set up pending resolve
+          const timeout = setTimeout(() => {
+            this.pendingResolve = null;
+            resolve(null);
+          }, Math.min(remaining, 500));
+
+          this.pendingResolve = (m: ParsedSerialMessage) => {
+            clearTimeout(timeout);
+            resolve(m);
+          };
+        });
 
         if (msg) {
           handshakeLines.push(msg);
-          const result = parseHandshake(handshakeLines);
-          if (result) return result;
+
+          // Try with READY required first (enhanced firmware sends READY)
+          const resultWithReady = parseHandshake(handshakeLines, true);
+          if (resultWithReady) return resultWithReady;
+
+          // Try without READY (original firmware)
+          const resultNoReady = parseHandshake(handshakeLines, false);
+          if (resultNoReady) {
+            // We have USERNAME + PUBLIC_KEY but no READY.
+            // Wait 2 more seconds in case READY arrives.
+            const readyDeadline = Date.now() + 2000;
+            while (Date.now() < readyDeadline) {
+              // Drain queue
+              while (this.lineQueue.length > 0) {
+                const extra = this.lineQueue.shift()!;
+                handshakeLines.push(extra);
+                const final = parseHandshake(handshakeLines, true);
+                if (final) return final;
+              }
+              await new Promise((r) => setTimeout(r, 100));
+            }
+            // Accept without READY
+            return resultNoReady;
+          }
         }
       } catch {
         // Continue waiting
@@ -364,15 +410,19 @@ export class RealESP32Device implements IHardwareDevice {
       // Also drain any queued messages
       while (this.lineQueue.length > 0) {
         handshakeLines.push(this.lineQueue.shift()!);
-        const result = parseHandshake(handshakeLines);
+        const result = parseHandshake(handshakeLines, true);
         if (result) return result;
       }
-
-      // Small delay to avoid tight loop
-      await new Promise((r) => setTimeout(r, 50));
     }
 
-    throw new Error("Handshake timeout: device did not send USERNAME + PUBLIC_KEY + READY");
+    // Last attempt without READY requirement
+    const lastAttempt = parseHandshake(handshakeLines, false);
+    if (lastAttempt) return lastAttempt;
+
+    throw new Error(
+      "Handshake timeout: device did not send USERNAME + PUBLIC_KEY. " +
+      `Received ${handshakeLines.length} lines: [${handshakeLines.map(l => l.type).join(", ")}]`
+    );
   }
 
   private rejectPending(reason: string): void {

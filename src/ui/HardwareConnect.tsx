@@ -79,7 +79,7 @@ export default function HardwareConnect({ state, actions }: Props) {
                   : "bg-sovereign-bg text-sovereign-muted hover:text-sovereign-text"
               }`}
             >
-              🔌 ESP32 Hardware
+              🔌 ESP Hardware
             </button>
           </div>
 
@@ -117,17 +117,36 @@ export default function HardwareConnect({ state, actions }: Props) {
                     ✓ WebSerial available
                   </p>
                   <p className="text-[10px] text-sovereign-muted">
-                    Connect ESP32 via USB. Browser will prompt for serial port access.
-                    Device must send USERNAME + PUBLIC_KEY + READY handshake at 115200 baud.
+                    Connect your ESP8266/ESP32 via USB. The browser will prompt you to
+                    select the serial port. Device must run the Sovereign Messenger firmware
+                    (115200 baud).
                   </p>
                   <details className="text-[10px] text-sovereign-muted">
-                    <summary className="cursor-pointer hover:text-sovereign-text">ESP32 not showing up?</summary>
+                    <summary className="cursor-pointer hover:text-sovereign-text">
+                      📋 Expected firmware protocol
+                    </summary>
+                    <div className="mt-1 pl-2 space-y-0.5 font-mono bg-sovereign-bg rounded p-1.5">
+                      <p className="text-sovereign-muted">Device → Browser:</p>
+                      <p className="text-sovereign-text">USERNAME:alice</p>
+                      <p className="text-sovereign-text">PUBLIC_KEY:abcdef...</p>
+                      <p className="text-sovereign-text">READY <span className="text-sovereign-muted">(optional)</span></p>
+                      <p className="text-sovereign-muted mt-1">Browser → Device:</p>
+                      <p className="text-sovereign-text">NONCE:&lt;64 hex chars&gt;</p>
+                      <p className="text-sovereign-muted mt-1">Device → Browser:</p>
+                      <p className="text-sovereign-text">SIGNATURE:&lt;64 hex chars&gt;</p>
+                    </div>
+                  </details>
+                  <details className="text-[10px] text-sovereign-muted">
+                    <summary className="cursor-pointer hover:text-sovereign-text">
+                      🔧 ESP not showing up?
+                    </summary>
                     <ul className="list-disc list-inside mt-1 space-y-0.5 pl-2">
-                      <li>Install CP2102 or CH340 USB-serial driver</li>
+                      <li>Install <strong>CP2102</strong> or <strong>CH340</strong> USB-serial driver</li>
                       <li>Check Device Manager → Ports (COM &amp; LPT)</li>
                       <li>Try a different USB cable (data cable, not charge-only)</li>
-                      <li>Ensure ESP32 firmware sends the handshake protocol</li>
-                      <li>Press the ESP32 RST button after connecting</li>
+                      <li>Press the <strong>RST</strong> button on your ESP after connecting</li>
+                      <li>Upload firmware from <code className="text-sovereign-accent">esp32/firmware.ino</code></li>
+                      <li>Ensure serial monitor is <strong>closed</strong> in Arduino IDE</li>
                     </ul>
                   </details>
                 </div>
@@ -149,7 +168,7 @@ export default function HardwareConnect({ state, actions }: Props) {
             {state.loading
               ? "Connecting..."
               : selectedMode === "hardware"
-              ? "🔌 Connect ESP32"
+              ? "🔌 Connect ESP Device"
               : "💻 Start Simulator"}
           </button>
 
@@ -168,7 +187,7 @@ export default function HardwareConnect({ state, actions }: Props) {
                 }`}
               />
               <span className="text-xs text-sovereign-muted uppercase">
-                {state.mode === "hardware" ? "ESP32 Hardware" : "Simulated Device"}
+                {state.mode === "hardware" ? "ESP Hardware" : "Simulated Device"}
               </span>
             </div>
             {state.deviceInfo?.username && (

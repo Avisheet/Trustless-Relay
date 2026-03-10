@@ -37,6 +37,9 @@ export type SerialMessageType =
   | "SIGNED"
   | "PONG"
   | "ERROR"
+  | "INFO"
+  | "PROMPT"
+  | "BOOT"
   | "UNKNOWN";
 
 export interface ParsedSerialMessage {
@@ -63,12 +66,31 @@ export function parseSerialLine(line: string): ParsedSerialMessage {
     return { type: "UNKNOWN", value: "", raw: line };
   }
 
+  // Handle ESP boot banner lines (no colon)
+  const upperTrimmed = trimmed.toUpperCase();
+  if (
+    upperTrimmed === "ESP8266 AUTH MODULE" ||
+    upperTrimmed === "ESP_AUTH_MODULE" ||
+    upperTrimmed.startsWith("ESP")
+  ) {
+    return { type: "BOOT", value: trimmed, raw: line };
+  }
+
   const colonIndex = trimmed.indexOf(":");
   if (colonIndex === -1) {
     // No-value commands: READY, PING, PONG
-    const cmd = trimmed.toUpperCase();
+    const cmd = upperTrimmed;
     if (cmd === "READY" || cmd === "PING" || cmd === "PONG") {
       return { type: cmd as SerialMessageType, value: "", raw: line };
+    }
+    // Boot messages like "Generating new device seed", "Loaded existing device seed"
+    if (
+      cmd.includes("SEED") ||
+      cmd.includes("GENERATING") ||
+      cmd.includes("LOADED") ||
+      cmd.includes("ENTER USERNAME")
+    ) {
+      return { type: "INFO", value: trimmed, raw: line };
     }
     return { type: "UNKNOWN", value: trimmed, raw: line };
   }
@@ -78,7 +100,7 @@ export function parseSerialLine(line: string): ParsedSerialMessage {
 
   const knownTypes: SerialMessageType[] = [
     "USERNAME", "PUBLIC_KEY", "FIRMWARE", "NONCE",
-    "SIGN", "SIGNATURE", "SIGNED", "ERROR",
+    "SIGN", "SIGNATURE", "SIGNED", "ERROR", "INFO", "PROMPT",
   ];
 
   if (knownTypes.includes(prefix as SerialMessageType)) {
@@ -100,7 +122,17 @@ export function isValidHex(hex: string): boolean {
  * Expects at least USERNAME and PUBLIC_KEY lines, plus READY.
  * Returns null if the handshake is incomplete.
  */
-export function parseHandshake(lines: ParsedSerialMessage[]): DeviceHandshake | null {
+/**
+ * Parse a complete device handshake from accumulated lines.
+ * Requires USERNAME and PUBLIC_KEY lines.
+ * READY is optional — the user's original ESP firmware doesn't send it.
+ * If READY is not received, we accept the handshake once we have
+ * both USERNAME and PUBLIC_KEY (after a brief settling period).
+ */
+export function parseHandshake(
+  lines: ParsedSerialMessage[],
+  requireReady = false
+): DeviceHandshake | null {
   let username: string | null = null;
   let publicKey: string | null = null;
   let firmwareVersion: string | undefined;
@@ -109,15 +141,15 @@ export function parseHandshake(lines: ParsedSerialMessage[]): DeviceHandshake | 
   for (const msg of lines) {
     switch (msg.type) {
       case "USERNAME":
-        username = msg.value;
+        username = msg.value.trim();
         break;
       case "PUBLIC_KEY":
-        if (isValidHex(msg.value)) {
-          publicKey = msg.value;
+        if (isValidHex(msg.value.trim())) {
+          publicKey = msg.value.trim();
         }
         break;
       case "FIRMWARE":
-        firmwareVersion = msg.value;
+        firmwareVersion = msg.value.trim();
         break;
       case "READY":
         ready = true;
@@ -125,7 +157,13 @@ export function parseHandshake(lines: ParsedSerialMessage[]): DeviceHandshake | 
     }
   }
 
-  if (!username || !publicKey || !ready) {
+  // Must have at least USERNAME and PUBLIC_KEY
+  if (!username || !publicKey) {
+    return null;
+  }
+
+  // If READY is required and not received, wait
+  if (requireReady && !ready) {
     return null;
   }
 

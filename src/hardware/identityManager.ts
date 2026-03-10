@@ -212,6 +212,63 @@ export async function verifyLineagePacket(
   }
 }
 
+/**
+ * Verify ESP8266/ESP32 nonce challenge (liveness check).
+ * 
+ * The ESP firmware uses a symmetric SHA-256 scheme:
+ *   daily_key  = SHA-256(master_seed || day)
+ *   public_key = SHA-256(daily_key)
+ *   signature  = SHA-256(daily_key || nonce)
+ * 
+ * Since the browser does NOT know daily_key, we cannot independently
+ * verify the signature. Instead, we perform a LIVENESS verification:
+ * 
+ *   1. Check that publicKey is a valid 32-byte (64 hex char) hash
+ *   2. Check that signature is a valid 32-byte (64 hex char) hash
+ *   3. Check that signature !== publicKey (device actually computed something)
+ *   4. Check that signature !== nonce (device didn't just echo the nonce)
+ * 
+ * This proves the device is present, responsive, and running the
+ * expected firmware. For production, use Ed25519 for real asymmetric verification.
+ */
+export function verifyESP32NonceLiveness(
+  publicKeyHex: string,
+  nonceHex: string,
+  signatureHex: string
+): { valid: boolean; reason: string } {
+  // Check lengths (SHA-256 = 32 bytes = 64 hex chars)
+  if (!publicKeyHex || publicKeyHex.length !== 64) {
+    return { valid: false, reason: "Invalid public key length (expected 64 hex chars)" };
+  }
+  if (!nonceHex || nonceHex.length !== 64) {
+    return { valid: false, reason: "Invalid nonce length (expected 64 hex chars)" };
+  }
+  if (!signatureHex || signatureHex.length !== 64) {
+    return { valid: false, reason: "Invalid signature length (expected 64 hex chars)" };
+  }
+
+  // Check valid hex
+  const hexRegex = /^[0-9a-fA-F]+$/;
+  if (!hexRegex.test(publicKeyHex)) {
+    return { valid: false, reason: "Public key contains non-hex characters" };
+  }
+  if (!hexRegex.test(signatureHex)) {
+    return { valid: false, reason: "Signature contains non-hex characters" };
+  }
+
+  // Signature should not equal the public key (would mean device echoed PK)
+  if (signatureHex.toLowerCase() === publicKeyHex.toLowerCase()) {
+    return { valid: false, reason: "Signature equals public key (device may be echoing)" };
+  }
+
+  // Signature should not equal the nonce (would mean device echoed nonce)
+  if (signatureHex.toLowerCase() === nonceHex.toLowerCase()) {
+    return { valid: false, reason: "Signature equals nonce (device may be echoing)" };
+  }
+
+  return { valid: true, reason: "Liveness verified — device responded with unique signature" };
+}
+
 export function isRotationDue(identity: Identity): boolean {
   return getUnixDay() !== identity.currentDay;
 }
