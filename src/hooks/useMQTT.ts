@@ -3,6 +3,7 @@
  * 
  * React hook for managing MQTT connection and message transport.
  * Handles connection lifecycle, topic subscriptions, and message routing.
+ * Also supports presence broadcasting for peer discovery.
  */
 
 import { useState, useCallback, useRef, useEffect } from "react";
@@ -15,6 +16,7 @@ import {
   type MQTTConnection,
 } from "../mqtt/mqttClient";
 import { getInboxTopic } from "../mqtt/topicManager";
+import { MQTTPresenceManager, type DiscoveredNetworkPeer } from "../mqtt/presenceManager";
 import { v4 as uuidv4 } from "uuid";
 
 // ── Types ──────────────────────────────────────────────────────────────
@@ -25,12 +27,15 @@ export interface MQTTState {
   subscribedTopics: string[];
   error: string | null;
   messageCount: number;
+  networkPeers: DiscoveredNetworkPeer[];
 }
 
 export interface MQTTActions {
   connect: (brokerUrl?: string) => void;
   subscribe: (publicKeyHex: string) => void;
   publish: (receiverPublicKeyHex: string, serializedPacket: string) => void;
+  announcePresence: (publicKey: string, username: string, options?: { hardwarePublicKey?: string; hardwareUsername?: string }) => void;
+  stopPresence: () => void;
   disconnect: () => void;
 }
 
@@ -47,9 +52,11 @@ export function useMQTT(
     subscribedTopics: [],
     error: null,
     messageCount: 0,
+    networkPeers: [],
   });
 
   const connectionRef = useRef<MQTTConnection | null>(null);
+  const presenceRef = useRef<MQTTPresenceManager | null>(null);
   const onMessageRef = useRef(onMessage);
 
   // Keep callback ref up to date
@@ -77,6 +84,14 @@ export function useMQTT(
             error: null,
           }));
           console.log("[MQTT] Connected to broker:", brokerUrl);
+
+          // Initialize presence manager once connected
+          if (!presenceRef.current) {
+            presenceRef.current = new MQTTPresenceManager();
+            presenceRef.current.initialize(connection.client, (peers) => {
+              setState((s) => ({ ...s, networkPeers: peers }));
+            });
+          }
         },
         onDisconnect: () => {
           setState((s) => ({ ...s, connected: false }));
@@ -122,8 +137,31 @@ export function useMQTT(
     []
   );
 
+  // ── Announce Presence ──
+  const announcePresence = useCallback(
+    (publicKey: string, username: string, options?: { hardwarePublicKey?: string; hardwareUsername?: string }) => {
+      if (!presenceRef.current) {
+        console.warn("[MQTT] Presence manager not initialized");
+        return;
+      }
+      presenceRef.current.announcePresence(publicKey, username, options);
+    },
+    []
+  );
+
+  // ── Stop Presence ──
+  const stopPresence = useCallback(() => {
+    if (presenceRef.current) {
+      presenceRef.current.stopAnnouncing();
+    }
+  }, []);
+
   // ── Disconnect ──
   const disconnect = useCallback(() => {
+    if (presenceRef.current) {
+      presenceRef.current.cleanup();
+      presenceRef.current = null;
+    }
     if (connectionRef.current) {
       disconnectBroker(connectionRef.current);
       connectionRef.current = null;
@@ -134,17 +172,21 @@ export function useMQTT(
       subscribedTopics: [],
       error: null,
       messageCount: 0,
+      networkPeers: [],
     });
   }, []);
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
+      if (presenceRef.current) {
+        presenceRef.current.cleanup();
+      }
       if (connectionRef.current) {
         disconnectBroker(connectionRef.current);
       }
     };
   }, []);
 
-  return [state, { connect, subscribe, publish, disconnect }];
+  return [state, { connect, subscribe, publish, announcePresence, stopPresence, disconnect }];
 }

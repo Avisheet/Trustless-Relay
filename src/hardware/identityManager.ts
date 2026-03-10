@@ -14,12 +14,14 @@ import { toBuffer } from "../protocol/bufferCompat";
 // ── Types ──────────────────────────────────────────────────────────────
 
 export interface Identity {
-  publicKey: string;
-  privateKey: CryptoKey;
+  publicKey: string;                    // Software Ed25519/ECDSA public key (for WIMP signing)
+  privateKey: CryptoKey;                // Software Ed25519/ECDSA private key
   previousPublicKey: string | null;
   masterSeed: string;
   currentDay: number;
   createdAt: number;
+  hardwarePublicKey?: string;           // ESP32 SHA-256 public key (hardware identity anchor)
+  hardwareUsername?: string;            // Username from hardware device
 }
 
 export interface LineagePacket {
