@@ -20,6 +20,7 @@ import { useMQTT } from "../src/hooks/useMQTT";
 import { useLocalTransport } from "../src/hooks/useLocalTransport";
 import { useMessageLifecycle } from "../src/hooks/useMessageLifecycle";
 import { useDiscovery } from "../src/hooks/useDiscovery";
+import { useConnectionRequests } from "../src/hooks/useConnectionRequests";
 import { decodeInviteLink } from "../src/discovery/peerDiscovery";
 import { DemoEchoBot } from "../src/demo/demoEchoBot";
 import { getInboxTopic } from "../src/mqtt/topicManager";
@@ -30,6 +31,7 @@ import MessageComposer from "../src/ui/MessageComposer";
 import SecurityStatusPanel from "../src/ui/SecurityStatusPanel";
 import DebugPanel from "../src/ui/DebugPanel";
 import HardwareDebugPanel from "../src/ui/HardwareDebugPanel";
+import RequestModal from "../src/ui/RequestModal";
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -49,6 +51,7 @@ export default function Home() {
   const [activeContactPk, setActiveContactPk] = useState<string | null>(null);
   const [brokerUrl, setBrokerUrl] = useState("ws://localhost:9001");
   const [transportMode, setTransportMode] = useState<TransportMode>("demo");
+  const [currentIncomingRequest, setCurrentIncomingRequest] = useState<string | null>(null);
 
   // Demo echo bot ref (persists across renders)
   const echoBotRef = useRef<DemoEchoBot | null>(null);
@@ -88,6 +91,29 @@ export default function Home() {
     publicKey: identityState.identity?.publicKey ?? null,
     username: identityState.deviceInfo?.username ?? "anonymous",
   });
+
+  // ── Connection Requests ──
+  // Manages the two-way mutual connection request flow.
+  const {
+    incomingRequests,
+    outgoingRequests,
+    sendRequest,
+    acceptRequest,
+    rejectRequest,
+  } = useConnectionRequests({
+    publicKey: identityState.identity?.publicKey ?? null,
+    username: identityState.deviceInfo?.username ?? "anonymous",
+  });
+
+  // Show the first pending incoming request in the modal
+  const currentRequest = incomingRequests.find((r) => r.status === "pending");
+  useEffect(() => {
+    if (currentRequest && !currentIncomingRequest) {
+      setCurrentIncomingRequest(currentRequest.id);
+    } else if (!currentRequest && currentIncomingRequest) {
+      setCurrentIncomingRequest(null);
+    }
+  }, [currentRequest, currentIncomingRequest]);
 
   // ── Auto-connect transport when identity is ready ──
   useEffect(() => {
@@ -153,6 +179,39 @@ export default function Home() {
     },
     [addPeerFromInvite, handleAddContact]
   );
+
+  // Handle incoming connection request acceptance
+  const handleAcceptRequest = useCallback(
+    (requestId: string) => {
+      const request = incomingRequests.find((r) => r.id === requestId);
+      if (request) {
+        acceptRequest(requestId);
+        // Add the requester as a contact
+        handleAddContact(request.requesterPublicKey, request.requesterUsername);
+      }
+    },
+    [incomingRequests, acceptRequest, handleAddContact]
+  );
+
+  // Handle incoming connection request rejection
+  const handleRejectRequest = useCallback(
+    (requestId: string) => {
+      rejectRequest(requestId);
+    },
+    [rejectRequest]
+  );
+
+  // Handle request sent callback - when mutual acceptance happens
+  useEffect(() => {
+    outgoingRequests.forEach((req) => {
+      if (req.status === "accepted") {
+        // Auto-add as contact when mutually accepted
+        if (!contacts.find((c) => c.publicKey === req.recipientPublicKey)) {
+          handleAddContact(req.recipientPublicKey, req.recipientUsername);
+        }
+      }
+    });
+  }, [outgoingRequests, contacts, handleAddContact]);
 
   const handleSelectContact = useCallback(
     (publicKey: string) => {
@@ -339,6 +398,8 @@ export default function Home() {
               discoveredPeers={discoveredPeers}
               inviteLink={inviteLink}
               onPasteInvite={handlePasteInvite}
+              outgoingRequests={outgoingRequests}
+              onSendRequest={sendRequest}
             />
             <SecurityStatusPanel
               identity={identityState}
@@ -377,6 +438,13 @@ export default function Home() {
           </aside>
         </main>
       </div>
+
+      {/* Connection Request Modal */}
+      <RequestModal
+        request={currentRequest || null}
+        onAccept={handleAcceptRequest}
+        onReject={handleRejectRequest}
+      />
     </>
   );
 }

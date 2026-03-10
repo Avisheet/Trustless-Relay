@@ -80,37 +80,61 @@ export class RealESP32Device implements IHardwareDevice {
       throw new Error("WebSerial API not supported in this browser");
     }
 
-    // Request port from user gesture
-    this.port = await (navigator as any).serial.requestPort();
-    await this.port!.open({ baudRate: 115200 });
+    try {
+      // Request port from user gesture
+      this.port = await (navigator as any).serial.requestPort();
+      await this.port!.open({ baudRate: 115200 });
 
-    // Set up text streams
-    const textDecoder = new TextDecoderStream();
-    const textEncoder = new TextEncoderStream();
+      // Set up text streams with proper error handling
+      const textDecoder = new TextDecoderStream();
+      const textEncoder = new TextEncoderStream();
 
-    this.port!.readable.pipeTo(textDecoder.writable).catch(() => {});
-    textEncoder.readable.pipeTo(this.port!.writable).catch(() => {});
+      // These pipes handle the serial I/O streams
+      const decoderPipe = this.port!.readable.pipeTo(textDecoder.writable);
+      const encoderPipe = textEncoder.readable.pipeTo(this.port!.writable);
 
-    this.reader = textDecoder.readable.getReader();
-    this.writer = textEncoder.writable.getWriter();
-    this.accumulator.reset();
-    this.serialLog = [];
+      // Handle pipe errors
+      decoderPipe.catch((err) => {
+        console.error("[ESP32] Decoder pipe error:", err);
+        this.readLoopActive = false;
+        this.rejectPending(`Stream error: ${err}`);
+      });
 
-    // Start background read loop
-    this.readLoopActive = true;
-    this.startReadLoop();
+      encoderPipe.catch((err) => {
+        console.error("[ESP32] Encoder pipe error:", err);
+      });
 
-    // Wait for the device handshake (USERNAME, PUBLIC_KEY, READY)
-    const handshake = await this.waitForHandshake(10000);
+      this.reader = textDecoder.readable.getReader();
+      this.writer = textEncoder.writable.getWriter();
+      this.accumulator.reset();
+      this.serialLog = [];
 
-    this._username = handshake.username;
-    this._publicKey = handshake.publicKey;
-    this._firmwareVersion = handshake.firmwareVersion;
-    this._connected = true;
+      // Log connection start
+      this.addLog("rx", "[Connected to serial port]");
 
-    this.addLog("rx", `[Handshake] ${this._username} / ${this._publicKey.slice(0, 16)}...`);
+      // Start background read loop
+      this.readLoopActive = true;
+      // Don't await — let it run in background, but start it immediately
+      const readLoopPromise = this.startReadLoop();
 
-    return this.getDeviceInfo();
+      // Wait for the device handshake (USERNAME, PUBLIC_KEY, READY)
+      // This will timeout if device doesn't send expected messages
+      const handshake = await this.waitForHandshake(10000);
+
+      this._username = handshake.username;
+      this._publicKey = handshake.publicKey;
+      this._firmwareVersion = handshake.firmwareVersion;
+      this._connected = true;
+
+      this.addLog("rx", `[Handshake OK] ${this._username} / ${this._publicKey.slice(0, 16)}...`);
+
+      return this.getDeviceInfo();
+    } catch (err) {
+      // Clean up on error
+      this.readLoopActive = false;
+      await this.disconnect();
+      throw err;
+    }
   }
 
   // ── Disconnect ───────────────────────────────────────────────────────
@@ -174,11 +198,15 @@ export class RealESP32Device implements IHardwareDevice {
     await this.sendLine(`NONCE:${nonce}`);
 
     const response = await this.waitForResponse("SIGNATURE", 10000);
+    const signature = response.value.trim();
+    
+    // Log the signature length for debugging
+    this.addLog("rx", `[Response] Type: SIGNATURE, Length: ${signature.length} chars (${(signature.length/2).toFixed(0)} bytes)`);
 
     return {
       nonce,
       publicKey: this._publicKey,
-      signature: response.value,
+      signature,
       timestamp: Date.now(),
     };
   }
@@ -236,48 +264,61 @@ export class RealESP32Device implements IHardwareDevice {
   /**
    * Background read loop: continuously reads from serial and either
    * resolves pending promises or queues parsed messages.
+   * 
+   * This runs asynchronously and handles incoming serial data.
    */
   private async startReadLoop(): Promise<void> {
-    while (this.readLoopActive && this.reader) {
-      try {
-        const { value, done } = await this.reader.read();
-        if (done) {
-          this.readLoopActive = false;
-          break;
-        }
-        if (value) {
-          const lines = this.accumulator.feed(value);
-          for (const rawLine of lines) {
-            this.addLog("rx", rawLine);
-            const parsed = parseSerialLine(rawLine);
+    try {
+      while (this.readLoopActive && this.reader) {
+        try {
+          const { value, done } = await this.reader.read();
+          if (done) {
+            this.addLog("rx", "[Serial stream ended]");
+            this.readLoopActive = false;
+            break;
+          }
+          
+          if (value) {
+            // Feed raw data to accumulator, which emits complete lines
+            const lines = this.accumulator.feed(value);
+            
+            for (const rawLine of lines) {
+              this.addLog("rx", rawLine);
+              const parsed = parseSerialLine(rawLine);
 
-            if (parsed.type === "ERROR") {
-              console.error("[ESP32] Device error:", parsed.value);
-            }
-
-            // If someone is waiting for a response, resolve them
-            if (this.pendingResolve) {
-              const resolve = this.pendingResolve;
-              this.pendingResolve = null;
-              this.pendingReject = null;
-              if (this.pendingTimeout) {
-                clearTimeout(this.pendingTimeout);
-                this.pendingTimeout = null;
+              if (parsed.type === "ERROR") {
+                console.error("[ESP32] Device error:", parsed.value);
               }
-              resolve(parsed);
-            } else {
-              // Queue it for later consumption
-              this.lineQueue.push(parsed);
+
+              // If someone is waiting for a response, resolve them
+              if (this.pendingResolve) {
+                const resolve = this.pendingResolve;
+                this.pendingResolve = null;
+                this.pendingReject = null;
+                if (this.pendingTimeout) {
+                  clearTimeout(this.pendingTimeout);
+                  this.pendingTimeout = null;
+                }
+                resolve(parsed);
+              } else {
+                // Queue it for later consumption
+                this.lineQueue.push(parsed);
+              }
             }
           }
+        } catch (err) {
+          // Read error — log but try to continue
+          if (this.readLoopActive) {
+            console.error("[ESP32] Read error:", err);
+            // Don't exit loop immediately — wait a bit and retry
+            await new Promise((r) => setTimeout(r, 100));
+          }
         }
-      } catch (err) {
-        if (this.readLoopActive) {
-          console.error("[ESP32] Read error:", err);
-          this.readLoopActive = false;
-        }
-        break;
       }
+    } catch (err) {
+      console.error("[ESP32] Fatal read loop error:", err);
+      this.readLoopActive = false;
+      this.rejectPending(`Read loop error: ${err}`);
     }
   }
 
@@ -325,6 +366,15 @@ export class RealESP32Device implements IHardwareDevice {
 
   /**
    * Wait for the device handshake sequence.
+   * Works with both the original ESP firmware (no READY) and the
+   * enhanced version (with READY). Tolerates boot messages like
+   * "ESP8266 AUTH MODULE", "Loaded existing device seed", etc.
+   * 
+   * Strategy:
+   * 1. First wait up to `timeoutMs` collecting lines
+   * 2. Try to parse USERNAME + PUBLIC_KEY (+ optional READY/FIRMWARE)
+   * 3. If we get USERNAME + PUBLIC_KEY but no READY, wait 2 more seconds
+   *    in case READY arrives late, then accept without READY
    */
   private async waitForHandshake(timeoutMs: number): Promise<{
     username: string;
@@ -337,8 +387,12 @@ export class RealESP32Device implements IHardwareDevice {
     // First drain anything already in the queue
     while (this.lineQueue.length > 0) {
       handshakeLines.push(this.lineQueue.shift()!);
-      const result = parseHandshake(handshakeLines);
-      if (result) return result;
+      // Try with READY first (enhanced firmware)
+      const result = parseHandshake(handshakeLines, true);
+      if (result) {
+        this.addLog("rx", "[Handshake OK]");
+        return result;
+      }
     }
 
     // Then wait for new lines
@@ -346,33 +400,97 @@ export class RealESP32Device implements IHardwareDevice {
       const remaining = deadline - Date.now();
       if (remaining <= 0) break;
 
+      // Wait for any line type
       try {
-        const msg = await this.waitForResponse("USERNAME", remaining)
-          .catch(() => this.waitForResponse("PUBLIC_KEY", Math.max(remaining - 100, 100)))
-          .catch(() => this.waitForResponse("READY", Math.max(remaining - 200, 100)))
-          .catch(() => null);
+        const msg = await new Promise<ParsedSerialMessage | null>((resolve) => {
+          // Check queue first
+          if (this.lineQueue.length > 0) {
+            resolve(this.lineQueue.shift()!);
+            return;
+          }
+          // Set up pending resolve with longer timeout to wait for actual device response
+          const timeout = setTimeout(() => {
+            this.pendingResolve = null;
+            resolve(null);
+          }, Math.min(remaining, 1500)); // Increased timeout to allow device response
+
+          this.pendingResolve = (m: ParsedSerialMessage) => {
+            clearTimeout(timeout);
+            resolve(m);
+          };
+        });
 
         if (msg) {
           handshakeLines.push(msg);
-          const result = parseHandshake(handshakeLines);
-          if (result) return result;
+
+          // Try with READY required first (enhanced firmware sends READY)
+          const resultWithReady = parseHandshake(handshakeLines, true);
+          if (resultWithReady) {
+            this.addLog("rx", "[Handshake OK with READY]");
+            return resultWithReady;
+          }
+
+          // Try without READY (original firmware)
+          const resultNoReady = parseHandshake(handshakeLines, false);
+          if (resultNoReady) {
+            // We have USERNAME + PUBLIC_KEY but no READY.
+            // Wait 2 more seconds in case READY arrives.
+            this.addLog("rx", "[Got USERNAME+PUBLIC_KEY, waiting for READY...]");
+            const readyDeadline = Date.now() + 2000;
+            while (Date.now() < readyDeadline) {
+              // Drain queue
+              while (this.lineQueue.length > 0) {
+                const extra = this.lineQueue.shift()!;
+                handshakeLines.push(extra);
+                const final = parseHandshake(handshakeLines, true);
+                if (final) {
+                  this.addLog("rx", "[Handshake OK, got READY]");
+                  return final;
+                }
+              }
+              await new Promise((r) => setTimeout(r, 100));
+            }
+            // Accept without READY
+            this.addLog("rx", "[Handshake OK without READY]");
+            return resultNoReady;
+          }
         }
-      } catch {
+      } catch (err) {
         // Continue waiting
+        console.error("[ESP32] Error during handshake:", err);
       }
 
       // Also drain any queued messages
       while (this.lineQueue.length > 0) {
         handshakeLines.push(this.lineQueue.shift()!);
-        const result = parseHandshake(handshakeLines);
-        if (result) return result;
+        const result = parseHandshake(handshakeLines, true);
+        if (result) {
+          this.addLog("rx", "[Handshake OK from queue]");
+          return result;
+        }
       }
-
-      // Small delay to avoid tight loop
-      await new Promise((r) => setTimeout(r, 50));
     }
 
-    throw new Error("Handshake timeout: device did not send USERNAME + PUBLIC_KEY + READY");
+    // Last attempt without READY requirement
+    const lastAttempt = parseHandshake(handshakeLines, false);
+    if (lastAttempt) {
+      this.addLog("rx", "[Handshake OK on final attempt]");
+      return lastAttempt;
+    }
+
+    // Timeout — provide detailed diagnostic info
+    const receivedTypes = handshakeLines
+      .map((l) => `${l.type}:${l.value.slice(0, 20)}`)
+      .join(", ");
+    
+    const diagnostic =
+      handshakeLines.length === 0
+        ? "❌ NO DATA RECEIVED. Check: (1) Device is powered on, (2) USB cable is connected, (3) Correct COM port selected, (4) USB driver installed (CH340/CP2102), (5) Firmware uploaded to ESP32"
+        : `Received ${handshakeLines.length} unexpected message(s): [${receivedTypes}]. Device may not be running the Sovereign Messenger firmware.`;
+
+    const errorMsg = `Handshake timeout: device did not send USERNAME + PUBLIC_KEY.\n${diagnostic}`;
+    this.addLog("rx", `[HANDSHAKE FAILED] ${errorMsg}`);
+    throw new Error(errorMsg);
   }
 
   private rejectPending(reason: string): void {

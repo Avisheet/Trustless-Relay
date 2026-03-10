@@ -26,6 +26,7 @@ import {
   createSoftwareIdentity,
   rotateIdentity,
   verifyNonceChallenge,
+  verifyESP32NonceLiveness,
   isRotationDue,
   type Identity,
   type LineagePacket,
@@ -72,7 +73,7 @@ export function useHardwareIdentity(): [HardwareIdentityState, HardwareIdentityA
   const deviceRef = useRef<IHardwareDevice | null>(null);
   const rotationTimerRef = useRef<NodeJS.Timeout | null>(null);
 
-  // ── Hardware Connection (Real ESP32 via WebSerial) ──
+  // ── Hardware Connection (Real ESP32/ESP8266 via WebSerial) ──
   const connectHardware = useCallback(async () => {
     setState((s) => ({ ...s, loading: true, error: null }));
 
@@ -86,23 +87,38 @@ export function useHardwareIdentity(): [HardwareIdentityState, HardwareIdentityA
       deviceRef.current = device;
 
       // Connect — triggers WebSerial port picker and waits for handshake
+      // Works with both original firmware (no READY) and enhanced (with READY)
       const deviceInfo = await device.connect();
 
-      // Perform nonce challenge to verify device identity
+      // Perform nonce challenge to verify device liveness
       const challenge = await device.performNonceChallenge();
-      const valid = await verifyNonceChallenge(
+
+      // ESP firmware uses SHA-256 symmetric signing (not Ed25519/ECDSA).
+      // We can't do crypto.subtle.verify() — use liveness check instead.
+      const liveness = verifyESP32NonceLiveness(
         challenge.publicKey,
         challenge.nonce,
         challenge.signature
       );
 
-      if (!valid) {
+      if (!liveness.valid) {
         await device.disconnect();
-        throw new Error("ESP32 nonce challenge verification failed — identity not trusted");
+        const serialLog = device.getSerialLog();
+        const lastSigLog = serialLog
+          .reverse()
+          .find((log) => log.data.includes("SIGNATURE") || log.data.includes("Response"));
+        const diagnostic = lastSigLog 
+          ? ` Last response: ${lastSigLog.data.slice(0, 50)}...`
+          : " Check Hardware Debug Panel for serial log.";
+        throw new Error(`ESP nonce challenge failed: ${liveness.reason}.${diagnostic}`);
       }
 
-      // Create an identity wrapper for protocol compatibility
-      // Hardware signing goes through the device, not local keys
+      console.log(`[Hardware] ${liveness.reason}`);
+
+      // Create a software identity for protocol compatibility (WIMP signing).
+      // The ESP's public key becomes our identity address, but message signing
+      // uses the browser-generated key pair (ESP's SHA-256 scheme can't do
+      // Ed25519/ECDSA signatures needed for PICP).
       const softId = await createSoftwareIdentity();
       const identity: Identity = {
         ...softId,

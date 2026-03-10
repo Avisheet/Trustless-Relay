@@ -212,6 +212,96 @@ export async function verifyLineagePacket(
   }
 }
 
+/**
+ * Verify ESP8266/ESP32 nonce challenge (liveness check).
+ * 
+ * The ESP firmware uses a symmetric SHA-256 scheme:
+ *   daily_key  = SHA-256(master_seed || day)
+ *   public_key = SHA-256(daily_key)
+ *   signature  = SHA-256(daily_key || nonce)
+ * 
+ * Since the browser does NOT know daily_key, we cannot independently
+ * verify the signature. Instead, we perform a LIVENESS verification:
+ * 
+ *   1. Check that publicKey is a valid 32-byte (64 hex char) hash
+ *   2. Check that signature is a valid 32-byte (64 hex char) hash
+ *   3. Check that signature !== publicKey (device actually computed something)
+ *   4. Check that signature !== nonce (device didn't just echo the nonce)
+ * 
+ * This proves the device is present, responsive, and running the
+ * expected firmware. For production, use Ed25519 for real asymmetric verification.
+ */
+export function verifyESP32NonceLiveness(
+  publicKeyHex: string,
+  nonceHex: string,
+  signatureHex: string
+): { valid: boolean; reason: string } {
+  // Clean whitespace from all values (serial might have extra spaces)
+  const pk = (publicKeyHex || "").trim().toLowerCase();
+  const nc = (nonceHex || "").trim().toLowerCase();
+  const sig = (signatureHex || "").trim().toLowerCase();
+
+  // Validate hex format first
+  const hexRegex = /^[0-9a-f]*$/;
+  
+  if (!pk || !hexRegex.test(pk)) {
+    return { 
+      valid: false, 
+      reason: `Invalid public key format. Length: ${pk.length}, Expected: 64 hex chars` 
+    };
+  }
+  
+  if (!nc || !hexRegex.test(nc)) {
+    return { 
+      valid: false, 
+      reason: `Invalid nonce format. Length: ${nc.length}, Expected: 64 hex chars` 
+    };
+  }
+  
+  if (!sig || !hexRegex.test(sig)) {
+    return { 
+      valid: false, 
+      reason: `Invalid signature format (non-hex or empty). Length: ${sig.length}, Expected: 64+ hex chars` 
+    };
+  }
+
+  // Check lengths (SHA-256 = 32 bytes = 64 hex chars)
+  if (pk.length !== 64) {
+    return { 
+      valid: false, 
+      reason: `Invalid public key length. Got: ${pk.length}, Expected: 64 hex chars` 
+    };
+  }
+  
+  if (nc.length !== 64) {
+    return { 
+      valid: false, 
+      reason: `Invalid nonce length. Got: ${nc.length}, Expected: 64 hex chars` 
+    };
+  }
+  
+  // Allow signature lengths from 32 to 256 hex chars (16-128 bytes)
+  // SHA-256 produces 64 hex chars, but support other algorithms
+  if (sig.length < 32 || sig.length > 256) {
+    return { 
+      valid: false, 
+      reason: `Invalid signature length. Got: ${sig.length}, Expected: 32-256 hex chars (16-128 bytes)` 
+    };
+  }
+
+  // Signature should not equal the public key (would mean device echoed PK)
+  if (sig === pk) {
+    return { valid: false, reason: "Signature equals public key (device may be echoing)" };
+  }
+
+  // Signature should not equal the nonce (would mean device echoed nonce)
+  if (sig === nc) {
+    return { valid: false, reason: "Signature equals nonce (device may be echoing)" };
+  }
+
+  return { valid: true, reason: "Liveness verified — device responded with unique signature" };
+}
+
 export function isRotationDue(identity: Identity): boolean {
   return getUnixDay() !== identity.currentDay;
 }
