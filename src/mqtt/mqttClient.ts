@@ -30,7 +30,7 @@ export interface MQTTConnection {
 
 // ── Constants ──────────────────────────────────────────────────────────
 
-export const DEFAULT_BROKER_URL = "ws://localhost:9001";
+export const DEFAULT_BROKER_URL = "wss://broker.hivemq.com:8884/mqtt";
 
 // ── Connection Management ──────────────────────────────────────────────
 

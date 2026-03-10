@@ -49,7 +49,7 @@ export default function Home() {
   // ── State ──
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [activeContactPk, setActiveContactPk] = useState<string | null>(null);
-  const [brokerUrl, setBrokerUrl] = useState("ws://localhost:9001");
+  const [brokerUrl, setBrokerUrl] = useState("wss://broker.hivemq.com:8884/mqtt");
   const [transportMode, setTransportMode] = useState<TransportMode>("demo");
   const [currentIncomingRequest, setCurrentIncomingRequest] = useState<string | null>(null);
 
