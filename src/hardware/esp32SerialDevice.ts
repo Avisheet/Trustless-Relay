@@ -1,0 +1,389 @@
+/**
+ * Real ESP32 Serial Device
+ * 
+ * Implements IHardwareDevice for a physical ESP32 connected via WebSerial.
+ * Uses a text-based protocol (NOT JSON) for communication.
+ * 
+ * Text Protocol:
+ * 
+ *   Device sends on connect:
+ *     USERNAME:alice\n
+ *     PUBLIC_KEY:abcdef...\n
+ *     FIRMWARE:1.0.0\n       (optional)
+ *     READY\n
+ * 
+ *   Browser sends nonce challenge:
+ *     NONCE:abcdef...\n
+ *   Device responds:
+ *     SIGNATURE:abcdef...\n
+ * 
+ *   Browser sends sign request:
+ *     SIGN:abcdef...\n
+ *   Device responds:
+ *     SIGNED:abcdef...\n
+ * 
+ * Baud rate: 115200
+ */
+
+import type {
+  IHardwareDevice,
+  DeviceInfo,
+  DeviceMode,
+  NonceChallenge,
+  SerialLogEntry,
+} from "./deviceInterface";
+import {
+  SerialLineAccumulator,
+  parseSerialLine,
+  parseHandshake,
+  type ParsedSerialMessage,
+} from "./serialParser";
+import { bytesToHex, generateNonce } from "./esp32Interface";
+
+// ── RealESP32Device ────────────────────────────────────────────────────
+
+export class RealESP32Device implements IHardwareDevice {
+  readonly mode: DeviceMode = "hardware";
+
+  private port: SerialPort | null = null;
+  private reader: ReadableStreamDefaultReader<string> | null = null;
+  private writer: WritableStreamDefaultWriter<string> | null = null;
+  private accumulator = new SerialLineAccumulator();
+  private serialLog: SerialLogEntry[] = [];
+
+  private _connected = false;
+  private _username = "";
+  private _publicKey = "";
+  private _firmwareVersion?: string;
+
+  // Pending line resolution: when we're waiting for a specific response
+  private pendingResolve: ((line: ParsedSerialMessage) => void) | null = null;
+  private pendingReject: ((err: Error) => void) | null = null;
+  private pendingTimeout: ReturnType<typeof setTimeout> | null = null;
+
+  // Background reader task
+  private readLoopActive = false;
+  private lineQueue: ParsedSerialMessage[] = [];
+
+  get connected(): boolean {
+    return this._connected;
+  }
+
+  // ── Connect ──────────────────────────────────────────────────────────
+
+  async connect(): Promise<DeviceInfo> {
+    if (this._connected) {
+      return this.getDeviceInfo();
+    }
+
+    if (!("serial" in navigator)) {
+      throw new Error("WebSerial API not supported in this browser");
+    }
+
+    // Request port from user gesture
+    this.port = await (navigator as any).serial.requestPort();
+    await this.port!.open({ baudRate: 115200 });
+
+    // Set up text streams
+    const textDecoder = new TextDecoderStream();
+    const textEncoder = new TextEncoderStream();
+
+    this.port!.readable.pipeTo(textDecoder.writable).catch(() => {});
+    textEncoder.readable.pipeTo(this.port!.writable).catch(() => {});
+
+    this.reader = textDecoder.readable.getReader();
+    this.writer = textEncoder.writable.getWriter();
+    this.accumulator.reset();
+    this.serialLog = [];
+
+    // Start background read loop
+    this.readLoopActive = true;
+    this.startReadLoop();
+
+    // Wait for the device handshake (USERNAME, PUBLIC_KEY, READY)
+    const handshake = await this.waitForHandshake(10000);
+
+    this._username = handshake.username;
+    this._publicKey = handshake.publicKey;
+    this._firmwareVersion = handshake.firmwareVersion;
+    this._connected = true;
+
+    this.addLog("rx", `[Handshake] ${this._username} / ${this._publicKey.slice(0, 16)}...`);
+
+    return this.getDeviceInfo();
+  }
+
+  // ── Disconnect ───────────────────────────────────────────────────────
+
+  async disconnect(): Promise<void> {
+    this.readLoopActive = false;
+    this.rejectPending("Device disconnected");
+
+    try {
+      if (this.reader) {
+        this.reader.releaseLock();
+        this.reader = null;
+      }
+      if (this.writer) {
+        this.writer.releaseLock();
+        this.writer = null;
+      }
+      if (this.port) {
+        await this.port.close();
+        this.port = null;
+      }
+    } catch (err) {
+      console.warn("[ESP32] Disconnect error:", err);
+    }
+
+    this._connected = false;
+    this._username = "";
+    this._publicKey = "";
+    this.accumulator.reset();
+  }
+
+  // ── Device Info ──────────────────────────────────────────────────────
+
+  getDeviceInfo(): DeviceInfo {
+    this.assertConnected();
+    return {
+      username: this._username,
+      publicKey: this._publicKey,
+      connected: this._connected,
+      mode: this.mode,
+      firmwareVersion: this._firmwareVersion,
+    };
+  }
+
+  getPublicKey(): string {
+    this.assertConnected();
+    return this._publicKey;
+  }
+
+  getUsername(): string {
+    this.assertConnected();
+    return this._username;
+  }
+
+  // ── Nonce Challenge ──────────────────────────────────────────────────
+
+  async performNonceChallenge(): Promise<NonceChallenge> {
+    this.assertConnected();
+
+    const nonce = await generateNonce();
+    await this.sendLine(`NONCE:${nonce}`);
+
+    const response = await this.waitForResponse("SIGNATURE", 10000);
+
+    return {
+      nonce,
+      publicKey: this._publicKey,
+      signature: response.value,
+      timestamp: Date.now(),
+    };
+  }
+
+  // ── Sign Data ────────────────────────────────────────────────────────
+
+  async signData(data: Uint8Array): Promise<string> {
+    this.assertConnected();
+
+    const hex = bytesToHex(data);
+    await this.sendLine(`SIGN:${hex}`);
+
+    const response = await this.waitForResponse("SIGNED", 10000);
+    return response.value;
+  }
+
+  // ── Serial Log ───────────────────────────────────────────────────────
+
+  getSerialLog(): SerialLogEntry[] {
+    return [...this.serialLog];
+  }
+
+  clearSerialLog(): void {
+    this.serialLog = [];
+  }
+
+  // ── Private Key (not available for hardware) ─────────────────────────
+
+  getPrivateKey(): CryptoKey | null {
+    return null; // Hardware devices sign on-device
+  }
+
+  // ── Internal Helpers ─────────────────────────────────────────────────
+
+  private assertConnected(): void {
+    if (!this._connected) {
+      throw new Error("ESP32 device not connected");
+    }
+  }
+
+  private addLog(direction: "tx" | "rx", data: string): void {
+    this.serialLog.push({ timestamp: Date.now(), direction, data });
+    // Cap log at 500 entries
+    if (this.serialLog.length > 500) {
+      this.serialLog = this.serialLog.slice(-400);
+    }
+  }
+
+  private async sendLine(line: string): Promise<void> {
+    if (!this.writer) throw new Error("Serial writer not available");
+    this.addLog("tx", line);
+    await this.writer.write(line + "\n");
+  }
+
+  /**
+   * Background read loop: continuously reads from serial and either
+   * resolves pending promises or queues parsed messages.
+   */
+  private async startReadLoop(): Promise<void> {
+    while (this.readLoopActive && this.reader) {
+      try {
+        const { value, done } = await this.reader.read();
+        if (done) {
+          this.readLoopActive = false;
+          break;
+        }
+        if (value) {
+          const lines = this.accumulator.feed(value);
+          for (const rawLine of lines) {
+            this.addLog("rx", rawLine);
+            const parsed = parseSerialLine(rawLine);
+
+            if (parsed.type === "ERROR") {
+              console.error("[ESP32] Device error:", parsed.value);
+            }
+
+            // If someone is waiting for a response, resolve them
+            if (this.pendingResolve) {
+              const resolve = this.pendingResolve;
+              this.pendingResolve = null;
+              this.pendingReject = null;
+              if (this.pendingTimeout) {
+                clearTimeout(this.pendingTimeout);
+                this.pendingTimeout = null;
+              }
+              resolve(parsed);
+            } else {
+              // Queue it for later consumption
+              this.lineQueue.push(parsed);
+            }
+          }
+        }
+      } catch (err) {
+        if (this.readLoopActive) {
+          console.error("[ESP32] Read error:", err);
+          this.readLoopActive = false;
+        }
+        break;
+      }
+    }
+  }
+
+  /**
+   * Wait for a specific response type from the device.
+   */
+  private waitForResponse(
+    expectedType: string,
+    timeoutMs: number
+  ): Promise<ParsedSerialMessage> {
+    // Check queue first
+    const queueIdx = this.lineQueue.findIndex(
+      (m) => m.type === expectedType || m.type === "ERROR"
+    );
+    if (queueIdx !== -1) {
+      const msg = this.lineQueue.splice(queueIdx, 1)[0];
+      if (msg.type === "ERROR") {
+        return Promise.reject(new Error(`Device error: ${msg.value}`));
+      }
+      return Promise.resolve(msg);
+    }
+
+    return new Promise<ParsedSerialMessage>((resolve, reject) => {
+      this.pendingResolve = (msg: ParsedSerialMessage) => {
+        if (msg.type === "ERROR") {
+          reject(new Error(`Device error: ${msg.value}`));
+        } else if (msg.type === expectedType) {
+          resolve(msg);
+        } else {
+          // Unexpected type — queue it and keep waiting
+          this.lineQueue.push(msg);
+          this.pendingResolve = resolve as any;
+          this.pendingReject = reject;
+        }
+      };
+      this.pendingReject = reject;
+      this.pendingTimeout = setTimeout(() => {
+        this.pendingResolve = null;
+        this.pendingReject = null;
+        this.pendingTimeout = null;
+        reject(new Error(`Timeout waiting for ${expectedType} (${timeoutMs}ms)`));
+      }, timeoutMs);
+    });
+  }
+
+  /**
+   * Wait for the device handshake sequence.
+   */
+  private async waitForHandshake(timeoutMs: number): Promise<{
+    username: string;
+    publicKey: string;
+    firmwareVersion?: string;
+  }> {
+    const deadline = Date.now() + timeoutMs;
+    const handshakeLines: ParsedSerialMessage[] = [];
+
+    // First drain anything already in the queue
+    while (this.lineQueue.length > 0) {
+      handshakeLines.push(this.lineQueue.shift()!);
+      const result = parseHandshake(handshakeLines);
+      if (result) return result;
+    }
+
+    // Then wait for new lines
+    while (Date.now() < deadline) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+
+      try {
+        const msg = await this.waitForResponse("USERNAME", remaining)
+          .catch(() => this.waitForResponse("PUBLIC_KEY", Math.max(remaining - 100, 100)))
+          .catch(() => this.waitForResponse("READY", Math.max(remaining - 200, 100)))
+          .catch(() => null);
+
+        if (msg) {
+          handshakeLines.push(msg);
+          const result = parseHandshake(handshakeLines);
+          if (result) return result;
+        }
+      } catch {
+        // Continue waiting
+      }
+
+      // Also drain any queued messages
+      while (this.lineQueue.length > 0) {
+        handshakeLines.push(this.lineQueue.shift()!);
+        const result = parseHandshake(handshakeLines);
+        if (result) return result;
+      }
+
+      // Small delay to avoid tight loop
+      await new Promise((r) => setTimeout(r, 50));
+    }
+
+    throw new Error("Handshake timeout: device did not send USERNAME + PUBLIC_KEY + READY");
+  }
+
+  private rejectPending(reason: string): void {
+    if (this.pendingReject) {
+      this.pendingReject(new Error(reason));
+      this.pendingResolve = null;
+      this.pendingReject = null;
+    }
+    if (this.pendingTimeout) {
+      clearTimeout(this.pendingTimeout);
+      this.pendingTimeout = null;
+    }
+  }
+}
