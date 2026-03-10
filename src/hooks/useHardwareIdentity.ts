@@ -116,13 +116,15 @@ export function useHardwareIdentity(): [HardwareIdentityState, HardwareIdentityA
       console.log(`[Hardware] ${liveness.reason}`);
 
       // Create a software identity for protocol compatibility (WIMP signing).
-      // The ESP's public key becomes our identity address, but message signing
-      // uses the browser-generated key pair (ESP's SHA-256 scheme can't do
+      // The ESP's public key becomes our hardware identity anchor, but message signing
+      // uses the browser-generated Ed25519/ECDSA key pair (ESP's SHA-256 scheme can't do
       // Ed25519/ECDSA signatures needed for PICP).
       const softId = await createSoftwareIdentity();
       const identity: Identity = {
         ...softId,
-        publicKey: deviceInfo.publicKey,
+        hardwarePublicKey: deviceInfo.publicKey,        // Keep ESP32 key separate
+        hardwareUsername: deviceInfo.username,
+        // softId.publicKey is used for WIMP signing (Ed25519/ECDSA)
       };
 
       setState({

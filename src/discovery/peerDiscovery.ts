@@ -208,6 +208,31 @@ export class PeerDiscoveryService {
   }
 
   /**
+   * Integrate network peers from MQTT presence (called when MQTT peers change).
+   * Merges network peers with existing peers, favoring existing peer data.
+   */
+  updateNetworkPeers(networkPeers: Array<{ publicKey: string; username: string }>): void {
+    for (const peer of networkPeers) {
+      // Skip ourselves
+      if (peer.publicKey === this.myPublicKey) continue;
+
+      const existing = this.peers.get(peer.publicKey);
+      if (existing) {
+        // Update last seen and username
+        existing.lastSeen = Date.now();
+        existing.username = peer.username;
+        // Upgrade source if it was manual, but keep mqtt/broadcast
+        if (existing.source === "manual") {
+          existing.source = "mqtt";
+        }
+      } else {
+        // New peer from network
+        this.addPeer(peer.publicKey, peer.username, "mqtt");
+      }
+    }
+  }
+
+  /**
    * Generate an invite link for our identity.
    */
   getInviteLink(): string | null {
