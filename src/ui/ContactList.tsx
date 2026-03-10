@@ -1,20 +1,24 @@
 /**
- * ContactList Component — v2 with Auto-Discovery
+ * ContactList Component — v2 with Connection Requests
  *
- * Three ways to add contacts (from easiest to manual):
+ * Four ways to add contacts:
  *
- * 1. **Discovered Peers** — Auto-detected via BroadcastChannel.
- *    Peers running the app in other tabs/windows appear automatically.
- *    Just click to add them as a contact. Zero effort.
+ * 1. **Connection Requests** — Send requests to discovered peers.
+ *    They accept/reject, and you become mutual contacts.
+ *    More realistic "friend request" flow.
  *
  * 2. **Invite Link** — Copy your link, share it, paste theirs.
  *    Works across devices. Like sharing a WhatsApp invite.
+ *    Auto-adds as contact (no request needed).
  *
  * 3. **Manual Add** — Paste a raw public key (fallback for power users).
+ *
+ * 4. **Accept Requests** — Respond to incoming connection requests.
  */
 
 import React, { useState } from "react";
 import type { DiscoveredPeer } from "../discovery/peerDiscovery";
+import type { OutgoingConnectionRequest } from "../discovery/connectionRequest";
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -36,6 +40,10 @@ interface Props {
   inviteLink?: string | null;
   /** Callback when user pastes an invite link. */
   onPasteInvite?: (url: string) => boolean;
+
+  /** Connection request functionality */
+  outgoingRequests?: OutgoingConnectionRequest[];
+  onSendRequest?: (recipientPublicKey: string, recipientUsername: string) => void;
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -60,6 +68,8 @@ export default function ContactList({
   discoveredPeers = [],
   inviteLink,
   onPasteInvite,
+  outgoingRequests = [],
+  onSendRequest,
 }: Props) {
   const [showManual, setShowManual] = useState(false);
   const [newKey, setNewKey] = useState("");
@@ -113,15 +123,26 @@ export default function ContactList({
     }
   };
 
-  // Add discovered peer as contact
-  const handleAddDiscovered = (peer: DiscoveredPeer) => {
-    onAddContact(peer.publicKey, peer.username);
+  // Send connection request to discovered peer
+  const handleSendRequest = (peer: DiscoveredPeer) => {
+    if (onSendRequest) {
+      onSendRequest(peer.publicKey, peer.username);
+    }
   };
 
-  // Filter: show only peers not already in contacts
+  // Get status text for a peer
+  const getRequestStatus = (peerId: string): OutgoingConnectionRequest | undefined => {
+    return outgoingRequests.find((r) => r.recipientPublicKey === peerId && r.status === "pending");
+  };
+
+  // Filter: show only peers not already in contacts and without pending requests
   const newPeers = discoveredPeers.filter(
-    (p) => !contacts.find((c) => c.publicKey === p.publicKey)
+    (p) => !contacts.find((c) => c.publicKey === p.publicKey) 
+      && !outgoingRequests.find((r) => r.recipientPublicKey === p.publicKey && r.status === "pending")
   );
+
+  // Get pending outgoing requests for display
+  const pendingRequests = outgoingRequests.filter((r) => r.status === "pending");
 
   return (
     <div className="bg-sovereign-panel border border-sovereign-border rounded-lg p-4 space-y-3">
@@ -135,7 +156,7 @@ export default function ContactList({
         </span>
       </div>
 
-      {/* ═══════ SECTION 1: Discovered Peers ═══════ */}
+      {/* ═══════ SECTION 1: Discovered Peers (ready for request) ═══════ */}
       {newPeers.length > 0 && (
         <div className="space-y-1">
           <h3 className="text-[10px] text-sovereign-muted uppercase tracking-wider flex items-center gap-1">
@@ -145,7 +166,7 @@ export default function ContactList({
           {newPeers.map((peer) => (
             <button
               key={peer.publicKey}
-              onClick={() => handleAddDiscovered(peer)}
+              onClick={() => handleSendRequest(peer)}
               className="w-full text-left px-3 py-2 rounded text-xs transition-colors
                          bg-green-950/30 hover:bg-green-900/40 border border-green-900/30
                          group"
@@ -155,7 +176,7 @@ export default function ContactList({
                   {SOURCE_ICONS[peer.source] || "📡"} {peer.username}
                 </span>
                 <span className="text-[10px] text-green-400 opacity-0 group-hover:opacity-100 transition-opacity">
-                  + Add
+                  Send Request
                 </span>
               </div>
               <div className="font-mono text-sovereign-muted mt-0.5">
@@ -166,12 +187,35 @@ export default function ContactList({
         </div>
       )}
 
+      {/* ═══════ SECTION 1.5: Pending Outgoing Requests ═══════ */}
+      {pendingRequests.length > 0 && (
+        <div className="space-y-1">
+          <h3 className="text-[10px] text-sovereign-muted uppercase tracking-wider flex items-center gap-1">
+            ⏳ Pending Requests ({pendingRequests.length})
+          </h3>
+          {pendingRequests.map((req) => (
+            <div
+              key={req.id}
+              className="w-full px-3 py-2 rounded text-xs
+                         bg-blue-950/30 border border-blue-900/30"
+            >
+              <div className="font-medium text-sovereign-text">
+                ⏳ {req.recipientUsername}
+              </div>
+              <div className="font-mono text-sovereign-muted mt-0.5 text-[9px]">
+                {truncateKey(req.recipientPublicKey)} • Waiting for response...
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* ═══════ SECTION 2: Saved Contacts ═══════ */}
       <div className="space-y-1">
         {contacts.length === 0 ? (
           <p className="text-xs text-sovereign-muted italic py-2">
             {newPeers.length > 0
-              ? "Click a discovered peer above to add them"
+              ? "Send a request to a discovered peer to connect"
               : "No contacts yet — open another tab to discover peers automatically"}
           </p>
         ) : (
