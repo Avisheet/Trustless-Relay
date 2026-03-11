@@ -17,6 +17,7 @@
  */
 
 import React, { useState } from "react";
+import QRCode from "qrcode.react";
 import type { DiscoveredPeer } from "../discovery/peerDiscovery";
 import type { OutgoingConnectionRequest } from "../discovery/connectionRequest";
 
@@ -254,7 +255,7 @@ export default function ContactList({
           <div className="mt-2 space-y-2">
             {/* Our invite link */}
             {inviteLink ? (
-              <div className="space-y-1">
+              <div className="space-y-2">
                 <label className="text-[10px] text-sovereign-muted">Your invite link:</label>
                 <div className="flex gap-1">
                   <input
@@ -274,6 +275,20 @@ export default function ContactList({
                     {inviteCopied ? "✓ Copied" : "📋 Copy"}
                   </button>
                 </div>
+                {/* QR Code */}
+                <div className="flex justify-center p-2 bg-sovereign-bg border border-sovereign-border rounded">
+                  <QRCode
+                    value={inviteLink}
+                    size={120}
+                    level="H"
+                    includeMargin={true}
+                    fgColor="#e0e0e0"
+                    bgColor="#1a1a1a"
+                  />
+                </div>
+                <p className="text-[9px] text-sovereign-muted text-center italic">
+                  Scan to share your identity
+                </p>
               </div>
             ) : (
               <p className="text-[10px] text-sovereign-muted italic">
